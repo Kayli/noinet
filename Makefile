@@ -7,4 +7,4 @@ report:
 	python3 ./ping_inet_report.py
 
 test:
-	python -m pytest -q
+	pytest -q
