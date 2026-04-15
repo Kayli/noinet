@@ -2,3 +2,4 @@
 *.log
 old/internet_log.txt
 
+__pycache__/
