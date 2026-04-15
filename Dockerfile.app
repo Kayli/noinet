@@ -7,16 +7,23 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install system packages and upgrade pip first so those layers cache
 # separately from project source changes.
 WORKDIR /app
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends iputils-ping ca-certificates curl \
-    && python -m pip install --upgrade pip
+    && python -m pip install --upgrade pip build wheel \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy project files after installing system deps so source changes
-# won't invalidate the system package and pip-upgrade layers.
+# Copy only package metadata and package sources needed to build/install the
+# package. This lets Docker cache the dependency-install step when source
+# files change frequently.
+COPY pyproject.toml pyproject.toml
+COPY noinet/ noinet/
+
+# Install the package into the image. This step will be re-run only when
+# package metadata or package sources change.
+RUN pip install --no-cache-dir .
+
+# Copy remaining files (tests, docs, CI, etc.) without affecting the
+# previously cached install step.
 COPY . /app
-
-# Install the package into the image (will re-run when source changes).
-RUN pip install . 
 
 CMD ["/bin/bash"]
