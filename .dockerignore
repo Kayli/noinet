@@ -1,0 +1,30 @@
+# Exclude virtualenvs and common env dirs
+.venv
+venv
+env
+
+# Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info/
+noinet.egg-info/
+
+# Tests and caches
+tests/
+.pytest_cache/
+
+# IDE/editor files
+.vscode/
+.idea/
+.DS_Store
+
+# Logs and large local files
+*.log
+ping-*.log
+
+# Git
+.git
