@@ -293,13 +293,15 @@ class TestAggregate:
         outages = _outages(("2026-04-15 10:00:02", "2026-04-15 10:00:05", 3))
         entries = list(aggregate_by_period(outages, granularity="hour"))
         assert len(entries) == 1
-        assert entries[0] == CoarseEntry(period="2026-04-15 10", outages=1, total_fails=3)
+        assert entries[0] == CoarseEntry(
+            period="2026-04-15 10", outages=1, total_fails=3)
 
     def test_single_outage_day_bucket(self) -> None:
         outages = _outages(("2026-04-15 10:00:02", "2026-04-15 10:00:05", 3))
         entries = list(aggregate_by_period(outages, granularity="day"))
         assert len(entries) == 1
-        assert entries[0] == CoarseEntry(period="2026-04-15", outages=1, total_fails=3)
+        assert entries[0] == CoarseEntry(
+            period="2026-04-15", outages=1, total_fails=3)
 
     def test_two_outages_same_hour(self) -> None:
         outages = _outages(
@@ -318,8 +320,10 @@ class TestAggregate:
         )
         entries = list(aggregate_by_period(outages, granularity="hour"))
         assert len(entries) == 2
-        assert entries[0] == CoarseEntry(period="2026-04-15 10", outages=1, total_fails=3)
-        assert entries[1] == CoarseEntry(period="2026-04-15 11", outages=1, total_fails=4)
+        assert entries[0] == CoarseEntry(
+            period="2026-04-15 10", outages=1, total_fails=3)
+        assert entries[1] == CoarseEntry(
+            period="2026-04-15 11", outages=1, total_fails=4)
 
     def test_two_outages_same_day_different_hours_collapse_to_one_day(self) -> None:
         outages = _outages(
@@ -368,11 +372,13 @@ class TestAggregate:
 class TestFormatCoarseEntry:
     def test_single_outage(self) -> None:
         entry = CoarseEntry(period="2026-04-15 10", outages=1, total_fails=5)
-        assert format_coarse_entry(entry) == "2026-04-15 10: 1 outage, 5 packets lost"
+        assert format_coarse_entry(
+            entry) == "2026-04-15 10: 1 outage, 5 packets lost, 99.9% up"
 
     def test_plural_outages(self) -> None:
         entry = CoarseEntry(period="2026-04-15", outages=3, total_fails=12)
-        assert format_coarse_entry(entry) == "2026-04-15: 3 outages, 12 packets lost"
+        assert format_coarse_entry(
+            entry) == "2026-04-15: 3 outages, 12 packets lost"
 
     def test_unknown_period(self) -> None:
         entry = CoarseEntry(period="unknown", outages=1, total_fails=3)
@@ -395,9 +401,10 @@ class TestCoarseReport:
         out = io.StringIO()
         coarse_report(lines, min_fails=3, granularity="hour", output=out)
         result_lines = out.getvalue().strip().splitlines()
-        assert len(result_lines) == 2
-        assert result_lines[0] == "2026-04-15 10: 1 outage, 3 packets lost"
-        assert result_lines[1] == "2026-04-15 11: 1 outage, 3 packets lost"
+        assert len(result_lines) == 3
+        assert result_lines[0] == "2026-04-15 10: 1 outage, 3 packets lost, 99.9% up"
+        assert result_lines[1] == "2026-04-15 11: 1 outage, 3 packets lost, 99.9% up"
+        assert result_lines[2] == "Total: 33.3% up (3 ok, 6 lost)"
 
     def test_coarse_report_day_merges_hours(self) -> None:
         lines = _make_log(
@@ -414,8 +421,9 @@ class TestCoarseReport:
         out = io.StringIO()
         coarse_report(lines, min_fails=3, granularity="day", output=out)
         result_lines = out.getvalue().strip().splitlines()
-        assert len(result_lines) == 1
+        assert len(result_lines) == 2
         assert result_lines[0] == "2026-04-15: 2 outages, 6 packets lost"
+        assert result_lines[1] == "Total: 33.3% up (3 ok, 6 lost)"
 
     def test_coarse_report_no_outages_produces_no_output(self) -> None:
         lines = _make_log(
@@ -423,4 +431,4 @@ class TestCoarseReport:
         )
         out = io.StringIO()
         coarse_report(lines, min_fails=3, granularity="hour", output=out)
-        assert out.getvalue() == ""
+        assert out.getvalue() == "Total: 100.0% up (1 ok, 0 lost)\n"

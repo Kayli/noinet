@@ -68,7 +68,14 @@ def _iter_with_progress(file: TextIO, progress: TextIO = sys.stderr) -> Iterator
         lines_read += 1
         now = time.monotonic()
         if now >= next_update:
-            pct = min(file.tell() * 100 // total, 100) if total else 0
+            # Re-stat the file size so the progress percentage reflects a
+            # growing logfile instead of capping at the initial size.
+            try:
+                current_total = os.fstat(file.fileno()).st_size
+            except OSError:
+                current_total = total
+            pct = min(file.tell() * 100 // current_total,
+                      100) if current_total else 0
             print(
                 f"\r  reading \u2026 {lines_read:,} lines ({pct}%)",
                 end="", file=progress, flush=True,
@@ -188,6 +195,16 @@ def format_coarse_entry(entry: CoarseEntry) -> str:
     n = entry["outages"]
     lost = entry["total_fails"]
     outage_word = "outage" if n == 1 else "outages"
+    # Assume the monitor runs continuously: an "hour" bucket represents
+    # 3600 expected pings. We report a percentage for hour buckets only;
+    # daily summaries do not include a percentage.
+    if period == "unknown":
+        return f"{period}: {n} {outage_word}, {lost} packets lost"
+    if len(period) == 13:  # "YYYY-MM-DD HH"
+        expected = 3600
+        availability = max(0.0, (expected - lost) / expected * 100.0)
+        return f"{period}: {n} {outage_word}, {lost} packets lost, {availability:.1f}% up"
+    # day or other formats: no percentage
     return f"{period}: {n} {outage_word}, {lost} packets lost"
 
 
@@ -203,8 +220,25 @@ def coarse_report(
     *granularity* (``"hour"`` or ``"day"``).  Each bucket is printed as a
     single summary line.
     """
-    for entry in aggregate_by_period(parse_outages(lines, min_fails), granularity):
+    # Stream the input so we don't materialize a large log in memory.
+    counts = {"successes": 0, "failures": 0}
+
+    def counting_lines(src: Iterable[str]) -> Iterator[str]:
+        for L in src:
+            if is_success(L):
+                counts["successes"] += 1
+            if is_failure(L):
+                counts["failures"] += 1
+            yield L
+
+    for entry in aggregate_by_period(parse_outages(counting_lines(lines), min_fails), granularity):
         print(format_coarse_entry(entry), file=output)
+
+    total = counts["successes"] + counts["failures"]
+    if total:
+        avail = counts["successes"] / total * 100.0
+        print(
+            f"Total: {avail:.1f}% up ({counts['successes']} ok, {counts['failures']} lost)", file=output)
 
 
 def report(
