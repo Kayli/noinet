@@ -25,6 +25,7 @@ tests/
 # Logs and large local files
 *.log
 ping-*.log
+*.backup
 
 # Git
 .git
