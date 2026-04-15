@@ -25,6 +25,9 @@ IMAGE := noinet-dev:latest
 DOCKERFILE := Dockerfile.app
 PWD := $(shell pwd)
 
+# Container runtime helper moved to scripts/container_run.sh to keep Makefile small
+# The script handles build, mount options and workdir heuristics for docker/podman.
+
 container-build:
 	@if [ -z "$(CONTAINER_CMD)" ]; then \
 		echo "Please install docker or podman to build the container."; exit 1; \
@@ -32,10 +35,8 @@ container-build:
 	printf "Using %s to build container\n" "$(CONTAINER_CMD)"; \
 	$(CONTAINER_CMD) build -f $(DOCKERFILE) -t $(IMAGE) .
 
-container-run: container-build
-	printf "Using %s to run container\n" "$(CONTAINER_CMD)"; \
-	$(CONTAINER_CMD) run --rm -it --cap-add=NET_RAW -v "$(PWD)":/workspaces/noinet -w /workspaces/noinet $(IMAGE) python3 -m noinet.ping_inet
+container-run:
+	sh scripts/container_run.sh run
 
-container-report: container-build
-	printf "Using %s to run report in container\n" "$(CONTAINER_CMD)"; \
-	$(CONTAINER_CMD) run --rm -it -v "$(PWD)":/workspaces/noinet -w /workspaces/noinet $(IMAGE) python3 -m noinet.ping_inet_report --coarse day
+container-report:
+	sh scripts/container_run.sh report
