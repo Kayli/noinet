@@ -1,3 +1,4 @@
 .DS_Store
-ping-8.8.8.8.log
+*.log
 old/internet_log.txt
+
