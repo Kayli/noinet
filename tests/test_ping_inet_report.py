@@ -404,7 +404,7 @@ class TestCoarseReport:
         assert len(result_lines) == 3
         assert result_lines[0] == "2026-04-15 10: 1 outage, 3 packets lost, 99.9% up"
         assert result_lines[1] == "2026-04-15 11: 1 outage, 3 packets lost, 99.9% up"
-        assert result_lines[2] == "Total: 33.3% up (3 ok, 6 lost)"
+        assert result_lines[2] == "Total: 33.3% up (3 ok, 6 lost), 0:00:06 down"
 
     def test_coarse_report_day_merges_hours(self) -> None:
         lines = _make_log(
@@ -423,7 +423,7 @@ class TestCoarseReport:
         result_lines = out.getvalue().strip().splitlines()
         assert len(result_lines) == 2
         assert result_lines[0] == "2026-04-15: 2 outages, 6 packets lost"
-        assert result_lines[1] == "Total: 33.3% up (3 ok, 6 lost)"
+        assert result_lines[1] == "Total: 33.3% up (3 ok, 6 lost), 0:00:06 down"
 
     def test_coarse_report_no_outages_produces_no_output(self) -> None:
         lines = _make_log(
@@ -431,4 +431,4 @@ class TestCoarseReport:
         )
         out = io.StringIO()
         coarse_report(lines, min_fails=3, granularity="hour", output=out)
-        assert out.getvalue() == "Total: 100.0% up (1 ok, 0 lost)\n"
+        assert out.getvalue() == "Total: 100.0% up (1 ok, 0 lost), 0:00:00 down\n"

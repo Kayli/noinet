@@ -4,3 +4,4 @@ old/internet_log.txt
 
 __pycache__/
 noinet.egg-info/
+.venv/

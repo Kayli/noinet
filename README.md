@@ -32,4 +32,17 @@ make test
 - `noinet/` — package source
 - `tests/` — unit tests
 
+
+## Uptime reference 
+
+Quick reference (approx. downtime):
+
+99.0% → 87.6 hours/year (≈3.7 days)
+99.9% → 8.76 hours/year
+99.95% → 4.38 hours/year
+99.99% → 52.6 minutes/year
+99.999% → 5.3 minutes/year
+
+
+
 License: MIT

@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from datetime import timedelta
 from collections import OrderedDict
 from typing import Iterable, Iterator, Optional, TextIO, TypedDict
 
@@ -237,8 +238,11 @@ def coarse_report(
     total = counts["successes"] + counts["failures"]
     if total:
         avail = counts["successes"] / total * 100.0
+        downtime = str(timedelta(seconds=counts["failures"]))
         print(
-            f"Total: {avail:.1f}% up ({counts['successes']} ok, {counts['failures']} lost)", file=output)
+            f"Total: {avail:.1f}% up ({counts['successes']} ok, {counts['failures']} lost), {downtime} down",
+            file=output,
+        )
 
 
 def report(
