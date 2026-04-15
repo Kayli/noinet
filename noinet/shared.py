@@ -18,3 +18,11 @@ def add_target_and_logfile_args(
         "--logfile",
         help="Log file path (default: ./ping-<target>.log)",
     )
+    parser.add_argument(
+        "--iface",
+        choices=["wifi", "lan"],
+        help=(
+            "Network interface type to use: 'wifi' or 'lan'. "
+            "If omitted the program will auto-detect an available interface."
+        ),
+    )

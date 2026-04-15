@@ -1,0 +1,17 @@
+#!/bin/sh
+# Shim wrapper that ensures the user's site-packages (where pip --user installs go)
+# are on PYTHONPATH so `python3 -m pip` can find the pip module when system
+# Python lacks it. This does not replace /usr/bin/python3; it forwards all args
+# to the real interpreter after adjusting PYTHONPATH.
+
+# Compute user site directory using the system python
+USER_SITE=$(/usr/bin/python3 -c 'import site; print(site.USER_SITE)')
+if [ -n "$USER_SITE" ]; then
+    if [ -n "$PYTHONPATH" ]; then
+        export PYTHONPATH="$USER_SITE:$PYTHONPATH"
+    else
+        export PYTHONPATH="$USER_SITE"
+    fi
+fi
+
+exec /usr/bin/python3 "$@"

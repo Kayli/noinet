@@ -10,6 +10,7 @@ import time
 from datetime import timedelta
 from collections import OrderedDict
 from typing import Iterable, Iterator, Optional, TextIO, TypedDict
+import contextlib
 
 from .shared import add_target_and_logfile_args
 
@@ -43,214 +44,261 @@ _FAIL_RE = re.compile(
 _SUCCESS_RE = re.compile(r"\d+ bytes from")
 
 
-_PROGRESS_INTERVAL = 0.25  # seconds between progress line refreshes
-
-
-def _iter_with_progress(file: TextIO, progress: TextIO = sys.stderr) -> Iterator[str]:
-    """Yield lines from *file* while printing a live progress indicator to *progress*.
-
-    Progress is only emitted when *progress* is connected to a terminal, so
-    piped or redirected output is never polluted.  Updates are rate-limited to
-    at most one refresh per :data:`_PROGRESS_INTERVAL` seconds.
-    """
-    if not progress.isatty():
-        yield from file
-        return
-
-    total = os.fstat(file.fileno()).st_size
-    lines_read = 0
-    next_update = time.monotonic()
-
-    while True:
-        line = file.readline()
-        if not line:
-            break
-        yield line
-        lines_read += 1
-        now = time.monotonic()
-        if now >= next_update:
-            # Re-stat the file size so the progress percentage reflects a
-            # growing logfile instead of capping at the initial size.
-            try:
-                current_total = os.fstat(file.fileno()).st_size
-            except OSError:
-                current_total = total
-            pct = min(file.tell() * 100 // current_total,
-                      100) if current_total else 0
-            print(
-                f"\r  reading \u2026 {lines_read:,} lines ({pct}%)",
-                end="", file=progress, flush=True,
-            )
-            next_update = now + _PROGRESS_INTERVAL
-
-    # Overwrite the progress line with a compact completion notice.
-    print(
-        f"\r  read {lines_read:,} lines \u2014 done.{' ' * 20}",
-        file=progress, flush=True,
-    )
-
-
-def parse_timestamp(line: str) -> Optional[str]:
-    """Extract the timestamp string from a log line, or return None."""
-    m = _TS_RE.match(line)
-    return m.group(1) if m else None
-
-
-def is_failure(line: str) -> bool:
-    """Return True if the line reports a missing/unreachable packet."""
-    return bool(_FAIL_RE.search(line))
-
-
-def is_success(line: str) -> bool:
-    """Return True if the line reports a successfully received packet."""
-    return bool(_SUCCESS_RE.search(line))
-
-
-def parse_outages(lines: Iterable[str], min_fails: int = 3) -> Iterator[Outage]:
-    """Yield outage dicts for every gap that lasted at least *min_fails* packets.
-
-    Each dict has:
-      ``start``  – timestamp of the first lost packet
-      ``end``    – timestamp of the first recovered packet, or ``None`` if the
-                   log ends while still down
-      ``fails``  – total number of lost packets in the window
-    """
-    current_ts: Optional[str] = None
-    fails: int = 0
-    outage_start: Optional[str] = None
-
-    for line in lines:
-        ts = parse_timestamp(line)
-        if ts:
-            current_ts = ts
-
-        if is_failure(line):
-            fails += 1
-            if fails == 1:
-                outage_start = current_ts
-        elif is_success(line):
-            if fails >= min_fails:
-                yield {"start": outage_start, "end": current_ts, "fails": fails}
-            fails = 0
-            outage_start = None
-
-    if fails >= min_fails:
-        yield {"start": outage_start, "end": None, "fails": fails}
-
-
-def format_outage(outage: Outage) -> str:
-    """Format an outage dict as a human-readable string."""
-    start = outage["start"]
-    end = outage["end"]
-    fails = outage["fails"]
-    if end is None:
-        return f"{start} -> (still down, {fails} packets lost)"
-    return f"{start} -> {end} ({fails} packets lost)"
-
-
 _GRANULARITIES = ("hour", "day")
 
 
-def _period_key(ts: Optional[str], granularity: str) -> str:
-    """Truncate a timestamp string to the requested granularity bucket.
 
-    * ``"hour"`` keeps ``YYYY-MM-DD HH`` (drops minutes and seconds).
-    * ``"day"``  keeps ``YYYY-MM-DD``.
+def spark_coarse_report(logfile: str, min_fails: int = 3, granularity: str = "hour", output: TextIO = sys.stdout, progress: Optional[TextIO] = sys.stderr) -> None:
+    """Compute coarse-grained outage summary using PySpark.
 
-    A ``None`` timestamp (outage started before any timestamped line) is
-    returned as the string ``"unknown"``.
+    This mirrors :func:`coarse_report` but operates on the logfile path with
+    Spark to benefit from parallel IO and vectorized string processing.
     """
-    if ts is None:
-        return "unknown"
-    if granularity == "day":
-        return ts[:10]   # "YYYY-MM-DD"
-    # default: "hour"
-    return ts[:13]       # "YYYY-MM-DD HH"
+    def _suppress_spark_output():
+        """Context manager that temporarily silences stdout/stderr during
+        Spark import/initialization so Spark's own log lines don't pollute
+        the program's report output.
+        """
+        fd_null = os.open(os.devnull, os.O_RDWR)
+        old_out = os.dup(1)
+        old_err = os.dup(2)
+        try:
+            os.dup2(fd_null, 1)
+            os.dup2(fd_null, 2)
+            yield
+        finally:
+            os.dup2(old_out, 1)
+            os.dup2(old_err, 2)
+            os.close(fd_null)
+            os.close(old_out)
+            os.close(old_err)
 
+    try:
+        with contextlib.contextmanager(_suppress_spark_output)():
+            from pyspark.sql import SparkSession
+            from pyspark.sql import functions as F
+            from pyspark.sql.window import Window
+            spark = SparkSession.builder.appName(
+                "noinet-coarse-report").getOrCreate()
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise SystemExit(
+            "PySpark is not available in this environment: install pyspark and try again"
+        ) from exc
 
-def aggregate_by_period(
-    outages: Iterable[Outage], granularity: str = "hour"
-) -> Iterator[CoarseEntry]:
-    """Group *outages* into coarse time buckets and yield one :class:`CoarseEntry`
-    per bucket in chronological order.
+    # Reduce verbose Spark logging after startup
+    try:
+        spark.sparkContext.setLogLevel("ERROR")
+    except Exception:
+        pass
 
-    :param granularity: ``"hour"`` (default) or ``"day"``.
-    """
-    if granularity not in _GRANULARITIES:
-        raise ValueError(
-            f"granularity must be one of {_GRANULARITIES!r}, got {granularity!r}"
+    # Read the file as text lines
+    if progress:
+        print("[spark] reading logfile into DataFrame...",
+              file=progress, flush=True)
+    df = spark.read.text(logfile).withColumnRenamed("value", "line")
+
+    # Cache the DataFrame so we can run a quick count to materialize the
+    # read and provide a meaningful progress checkpoint without re-reading
+    # the file repeatedly during subsequent transformations.
+    df = df.cache()
+    start = time.monotonic()
+    # Trigger a read-and-cache action and report the total rows read.
+    try:
+        total_lines = df.count()
+    except Exception:
+        total_lines = None
+    elapsed = time.monotonic() - start
+    if total_lines is not None:
+        if progress:
+            print(
+                f"[spark] cached {total_lines:,} lines in {elapsed:.1f}s", file=progress, flush=True)
+    else:
+        if progress:
+            print(
+                f"[spark] cached (unknown line count) in {elapsed:.1f}s", file=progress, flush=True)
+
+    # Extract timestamp string and cast to timestamp
+    ts_re = _TS_RE.pattern
+    df = df.withColumn("ts_str", F.regexp_extract(F.col("line"), ts_re, 1))
+    df = df.withColumn("ts", F.to_timestamp(
+        F.col("ts_str"), "yyyy-MM-dd HH:mm:ss"))
+
+    # Flags
+    df = df.withColumn("is_fail", F.col(
+        "line").rlike(_FAIL_RE.pattern).cast("int"))
+    df = df.withColumn("is_success", F.col(
+        "line").rlike(_SUCCESS_RE.pattern).cast("int"))
+
+    # Identify start of failure runs
+    if progress:
+        print("[spark] detecting failure runs (window ops)...",
+              file=progress, flush=True)
+    w_order = Window.orderBy("ts")
+    df = df.withColumn("prev_fail", F.lag("is_fail").over(w_order))
+    df = df.withColumn(
+        "start_marker",
+        F.when((F.col("is_fail") == 1) & ((F.col("prev_fail") == 0)
+               | F.col("prev_fail").isNull()), 1).otherwise(0),
+    )
+
+    # Cumulative run id for failure runs
+    w_cum = Window.orderBy("ts").rowsBetween(
+        Window.unboundedPreceding, Window.currentRow)
+    df = df.withColumn("run_id", F.sum("start_marker").over(w_cum))
+
+    if progress:
+        print("[spark] computing per-run statistics and filtering short runs...",
+              file=progress, flush=True)
+    # Compute per-run statistics
+    run_stats = (
+        df.groupBy("run_id")
+        .agg(
+            F.min("ts").alias("start_ts"),
+            F.sum("is_fail").alias("fails"),
         )
-    buckets: OrderedDict[str, CoarseEntry] = OrderedDict()
-    for outage in outages:
-        key = _period_key(outage["start"], granularity)
-        if key not in buckets:
-            buckets[key] = CoarseEntry(period=key, outages=0, total_fails=0)
-        buckets[key]["outages"] += 1
-        buckets[key]["total_fails"] += outage["fails"]
-    yield from buckets.values()
+        .filter(F.col("fails") >= F.lit(min_fails))
+    )
 
+    # Period key for runs
+    if granularity == "hour":
+        period_fmt = "yyyy-MM-dd HH"
+    else:
+        period_fmt = "yyyy-MM-dd"
+    run_stats = run_stats.withColumn("period", F.when(F.col("start_ts").isNull(
+    ), F.lit("unknown")).otherwise(F.date_format(F.col("start_ts"), period_fmt)))
 
-def format_coarse_entry(entry: CoarseEntry) -> str:
-    """Format a :class:`CoarseEntry` as a human-readable summary line."""
-    period = entry["period"]
-    n = entry["outages"]
-    lost = entry["total_fails"]
-    outage_word = "outage" if n == 1 else "outages"
-    # Assume the monitor runs continuously: an "hour" bucket represents
-    # 3600 expected pings. We report a percentage for hour buckets only;
-    # daily summaries do not include a percentage.
-    if period == "unknown":
-        return f"{period}: {n} {outage_word}, {lost} packets lost"
-    if len(period) == 13:  # "YYYY-MM-DD HH"
-        expected = 3600
-        availability = max(0.0, (expected - lost) / expected * 100.0)
-        return f"{period}: {n} {outage_word}, {lost} packets lost, {availability:.1f}% up"
-    # day or other formats: no percentage
-    return f"{period}: {n} {outage_word}, {lost} packets lost"
+    # Aggregate per period
+    agg = run_stats.groupBy("period").agg(F.count("run_id").alias(
+        "outages"), F.sum("fails").alias("total_fails")).orderBy("period")
 
+    # Emit lines
+    for row in agg.collect():
+        period = row["period"] if row["period"] is not None else "unknown"
+        n = int(row["outages"] or 0)
+        lost = int(row["total_fails"] or 0)
+        outage_word = "outage" if n == 1 else "outages"
+        if period == "unknown":
+            print(f"{period}: {n} {outage_word}, {lost} packets lost", file=output)
+        elif len(period) == 13:
+            expected = 3600
+            availability = max(0.0, (expected - lost) / expected * 100.0)
+            print(
+                f"{period}: {n} {outage_word}, {lost} packets lost, {availability:.1f}% up", file=output)
+        else:
+            print(f"{period}: {n} {outage_word}, {lost} packets lost", file=output)
 
-def coarse_report(
-    lines: Iterable[str],
-    min_fails: int = 3,
-    granularity: str = "hour",
-    output: TextIO = sys.stdout,
-) -> None:
-    """Write a coarse-grained outage summary to *output*.
-
-    Outages are first detected with :func:`parse_outages`, then bucketed by
-    *granularity* (``"hour"`` or ``"day"``).  Each bucket is printed as a
-    single summary line.
-    """
-    # Stream the input so we don't materialize a large log in memory.
-    counts = {"successes": 0, "failures": 0}
-
-    def counting_lines(src: Iterable[str]) -> Iterator[str]:
-        for L in src:
-            if is_success(L):
-                counts["successes"] += 1
-            if is_failure(L):
-                counts["failures"] += 1
-            yield L
-
-    for entry in aggregate_by_period(parse_outages(counting_lines(lines), min_fails), granularity):
-        print(format_coarse_entry(entry), file=output)
-
-    total = counts["successes"] + counts["failures"]
+    # Totals
+    totals = df.agg(F.sum("is_success").alias("successes"),
+                    F.sum("is_fail").alias("failures")).collect()[0]
+    successes = int(totals["successes"] or 0)
+    failures = int(totals["failures"] or 0)
+    total = successes + failures
     if total:
-        avail = counts["successes"] / total * 100.0
-        downtime = str(timedelta(seconds=counts["failures"]))
+        avail = successes / total * 100.0
         print(
-            f"Total: {avail:.1f}% up ({counts['successes']} ok, {counts['failures']} lost), {downtime} down",
-            file=output,
+            f"Total: {avail:.1f}% up ({successes} ok, {failures} lost)", file=output)
+
+    spark.stop()
+
+
+def spark_report(logfile: str, min_fails: int = 3, output: TextIO = sys.stdout, progress: Optional[TextIO] = sys.stderr) -> None:
+    """Produce a detailed per-outage report using PySpark.
+
+    Each outage line mirrors the old text format: ``start -> end (N packets lost)``
+    or ``start -> (still down, N packets lost)`` when no recovery is present.
+    """
+    try:
+        from pyspark.sql import SparkSession
+        from pyspark.sql import functions as F
+        from pyspark.sql.window import Window
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise SystemExit("PySpark is not available in this environment: install pyspark and try again") from exc
+
+    # Silence Spark startup noise if requested
+    with contextlib.contextmanager(_suppress_spark_output)():
+        spark = SparkSession.builder.appName("noinet-report").getOrCreate()
+    try:
+        spark.sparkContext.setLogLevel("ERROR")
+    except Exception:
+        pass
+
+    if progress:
+        print("[spark] reading logfile into DataFrame...", file=progress, flush=True)
+    df = spark.read.text(logfile).withColumnRenamed("value", "line")
+    df = df.cache()
+    try:
+        total_lines = df.count()
+    except Exception:
+        total_lines = None
+    if progress:
+        if total_lines is not None:
+            print(f"[spark] cached {total_lines:,} lines", file=progress, flush=True)
+        else:
+            print("[spark] cached (unknown lines)", file=progress, flush=True)
+
+    # Parse timestamps and flags
+    ts_re = _TS_RE.pattern
+    df = df.withColumn("ts_str", F.regexp_extract(F.col("line"), ts_re, 1))
+    df = df.withColumn("ts", F.to_timestamp(F.col("ts_str"), "yyyy-MM-dd HH:mm:ss"))
+    df = df.withColumn("is_fail", F.col("line").rlike(_FAIL_RE.pattern).cast("int"))
+    df = df.withColumn("is_success", F.col("line").rlike(_SUCCESS_RE.pattern).cast("int"))
+
+    # Detect run starts
+    w_order = Window.orderBy("ts")
+    df = df.withColumn("prev_fail", F.lag("is_fail").over(w_order))
+    df = df.withColumn(
+        "start_marker",
+        F.when((F.col("is_fail") == 1) & ((F.col("prev_fail") == 0) | F.col("prev_fail").isNull()), 1).otherwise(0),
+    )
+
+    # Assign run ids and compute per-run fail counts
+    w_cum = Window.orderBy("ts").rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    df = df.withColumn("run_id", F.sum("start_marker").over(w_cum))
+
+    run_stats = (
+        df.groupBy("run_id")
+        .agg(
+            F.min("ts").alias("start_ts"),
+            F.sum("is_fail").alias("fails"),
         )
+    )
+
+    # For each start, find the first recovery timestamp after it
+    df = df.withColumn("recovery_ts", F.when(F.col("is_success") == 1, F.col("ts")))
+    w_follow = Window.orderBy("ts").rowsBetween(1, Window.unboundedFollowing)
+    df = df.withColumn("first_recovery_after", F.min("recovery_ts").over(w_follow))
+
+    # Start rows mark the outage start timestamp
+    start_rows = df.filter(F.col("start_marker") == 1).select("run_id", F.col("ts").alias("start_ts"), "first_recovery_after")
+
+    runs = start_rows.join(run_stats, on="run_id", how="left").filter(F.col("fails") >= F.lit(min_fails)).orderBy("start_ts")
+
+    for row in runs.collect():
+        start_ts = row["start_ts"]
+        end_ts = row["first_recovery_after"]
+        fails = int(row["fails"] or 0)
+        start_s = start_ts.strftime("%Y-%m-%d %H:%M:%S") if start_ts is not None else "unknown"
+        if end_ts is None:
+            print(f"{start_s} -> (still down, {fails} packets lost)", file=output)
+        else:
+            end_s = end_ts.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{start_s} -> {end_s} ({fails} packets lost)", file=output)
+
+    spark.stop()
 
 
 def report(
     lines: Iterable[str], min_fails: int = 3, output: TextIO = sys.stdout
 ) -> None:
-    """Write a formatted outage report to *output*."""
-    for outage in parse_outages(lines, min_fails):
-        print(format_outage(outage), file=output)
+    """Deprecated: kept for compatibility. Use Spark-based reporting instead.
+
+    This function previously streamed lines and detected outages in pure
+    Python. The project now uses PySpark for reporting; if you need to call
+    from Python code with an iterable of lines, convert the iterable to a
+    temporary file and use `spark_report`.
+    """
+    raise SystemExit(
+        "report() is removed; use spark_report(logfile, ...) instead")
 
 
 def main() -> None:
@@ -273,16 +321,40 @@ def main() -> None:
         help="Print a coarse-grained summary bucketed by 'hour' or 'day' instead"
              " of listing every individual outage window.",
     )
+    parser.add_argument(
+        "--spark",
+        action="store_true",
+        default=True,
+        help="Use PySpark for processing (default: true)",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--progress", action="store_true",
+                       help="Show progress messages on stdout")
+    group.add_argument("--quiet", action="store_true",
+                       help="Suppress progress messages entirely")
     args = parser.parse_args()
     logfile = args.logfile or f"./ping-{args.target}.log"
-    buf = io.StringIO()
-    with open(logfile, encoding="utf-8") as f:
-        lines: Iterable[str] = _iter_with_progress(f)
-        if args.coarse:
-            coarse_report(lines, args.min_fails, args.coarse, output=buf)
-        else:
-            report(lines, args.min_fails, output=buf)
-    sys.stdout.write(buf.getvalue())
+    # Determine where progress messages should go:
+    if args.quiet:
+        progress_stream = None
+    elif args.progress:
+        progress_stream = sys.stdout
+    else:
+        progress_stream = sys.stderr
+
+    # Use Spark-based implementations for all reporting and aggregation.
+    if args.coarse:
+        spark_coarse_report(logfile, args.min_fails, args.coarse,
+                            output=sys.stdout, progress=progress_stream)
+    else:
+        # For detailed reporting we currently rely on the Spark path too; if
+        # implemented, pass the same progress stream.
+        try:
+            spark_report(logfile, args.min_fails,
+                         output=sys.stdout, progress=progress_stream)
+        except NameError:
+            raise SystemExit(
+                "Detailed Spark report not implemented; use --coarse")
 
 
 if __name__ == "__main__":

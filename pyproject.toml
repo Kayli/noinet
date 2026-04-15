@@ -11,4 +11,4 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pylint>=2.17"]
+dev = ["pytest>=7.0", "pylint>=2.17", "pyspark"]
