@@ -9,7 +9,7 @@ run:
 	python3 -m noinet.ping_inet
 
 report:
-	python3 -m noinet.ping_inet_report
+	python3 -m noinet.ping_inet_report --coarse day
 
 test:
 	pytest -q
