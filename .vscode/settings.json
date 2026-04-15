@@ -1,8 +1,13 @@
 {
+  "python.analysis.typeCheckingMode": "basic",
+  "editor.formatOnSave": true,
   "files.exclude": {
     "**/__pycache__": true,
     "**/*.pyc": true,
-    ".pytest_cache": true
+    ".pytest_cache": true,
+    "noinet.egg-info": true,
+    "build": true,
+    "dist": true
   },
   "files.watcherExclude": {
     "**/__pycache__": true,

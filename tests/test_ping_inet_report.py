@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from ping_inet_report import (
+from noinet.ping_inet_report import (
     format_outage,
     is_failure,
     is_success,
@@ -31,7 +31,8 @@ class TestParseTimestamp:
         assert parse_timestamp("") is None
 
     def test_partial_bracket_returns_none(self) -> None:
-        assert parse_timestamp("[2026-04-15 10:00:01 missing close bracket") is None
+        assert parse_timestamp(
+            "[2026-04-15 10:00:01 missing close bracket") is None
 
 
 class TestIsFailure:
@@ -95,7 +96,7 @@ class TestParseOutages:
             ("2026-04-15 10:00:01", "64 bytes from 8.8.8.8: icmp_seq=1"),
             ("2026-04-15 10:00:02", "64 bytes from 8.8.8.8: icmp_seq=2"),
         )
-        assert list(parse_outages(lines, min_fails=3)) == []
+        assert not list(parse_outages(lines, min_fails=3))
 
     def test_fewer_fails_than_threshold_yields_nothing(self) -> None:
         lines = _make_log(
@@ -104,7 +105,7 @@ class TestParseOutages:
             ("2026-04-15 10:00:03", "no answer yet for icmp_seq=3"),
             ("2026-04-15 10:00:04", "64 bytes from 8.8.8.8: icmp_seq=4"),
         )
-        assert list(parse_outages(lines, min_fails=3)) == []
+        assert not list(parse_outages(lines, min_fails=3))
 
     def test_single_outage_exactly_at_threshold(self) -> None:
         lines = _make_log(
@@ -116,7 +117,9 @@ class TestParseOutages:
         )
         outages = list(parse_outages(lines, min_fails=3))
         assert len(outages) == 1
-        assert outages[0] == Outage(start="2026-04-15 10:00:02", end="2026-04-15 10:00:05", fails=3)
+        assert outages[0] == Outage(
+            start="2026-04-15 10:00:02", end="2026-04-15 10:00:05", fails=3
+        )
 
     def test_single_outage_above_threshold(self) -> None:
         lines = _make_log(
@@ -140,7 +143,8 @@ class TestParseOutages:
         )
         outages = list(parse_outages(lines, min_fails=3))
         assert len(outages) == 1
-        assert outages[0] == Outage(start="2026-04-15 10:00:02", end=None, fails=3)
+        assert outages[0] == Outage(
+            start="2026-04-15 10:00:02", end=None, fails=3)
 
     def test_multiple_separate_outages(self) -> None:
         lines = _make_log(
@@ -158,8 +162,12 @@ class TestParseOutages:
         )
         outages = list(parse_outages(lines, min_fails=3))
         assert len(outages) == 2
-        assert outages[0] == Outage(start="2026-04-15 10:00:02", end="2026-04-15 10:00:05", fails=3)
-        assert outages[1] == Outage(start="2026-04-15 10:01:02", end="2026-04-15 10:01:06", fails=4)
+        assert outages[0] == Outage(
+            start="2026-04-15 10:00:02", end="2026-04-15 10:00:05", fails=3
+        )
+        assert outages[1] == Outage(
+            start="2026-04-15 10:01:02", end="2026-04-15 10:01:06", fails=4
+        )
 
     def test_mixed_failure_types(self) -> None:
         """Different failure messages in one window should all be counted."""
@@ -175,7 +183,7 @@ class TestParseOutages:
         assert outages[0]["fails"] == 3
 
     def test_empty_log(self) -> None:
-        assert list(parse_outages([], min_fails=3)) == []
+        assert not list(parse_outages([], min_fails=3))
 
     def test_min_fails_one(self) -> None:
         """min_fails=1 should report every single lost packet."""
@@ -191,16 +199,28 @@ class TestParseOutages:
 
 class TestFormatOutage:
     def test_resolved_outage(self) -> None:
-        outage = Outage(start="2026-04-15 10:00:02", end="2026-04-15 10:00:05", fails=3)
-        assert format_outage(outage) == "2026-04-15 10:00:02 -> 2026-04-15 10:00:05 (3 packets lost)"
+        outage = Outage(
+            start="2026-04-15 10:00:02", end="2026-04-15 10:00:05", fails=3
+        )
+        assert format_outage(outage) == (
+            "2026-04-15 10:00:02 -> 2026-04-15 10:00:05 (3 packets lost)"
+        )
 
     def test_still_down(self) -> None:
-        outage = Outage(start="2026-04-15 10:00:02", end=None, fails=5)
-        assert format_outage(outage) == "2026-04-15 10:00:02 -> (still down, 5 packets lost)"
+        outage = Outage(
+            start="2026-04-15 10:00:02", end=None, fails=5
+        )
+        assert format_outage(outage) == (
+            "2026-04-15 10:00:02 -> (still down, 5 packets lost)"
+        )
 
     def test_single_packet_lost(self) -> None:
-        outage = Outage(start="2026-04-15 10:00:02", end="2026-04-15 10:00:03", fails=1)
-        assert format_outage(outage) == "2026-04-15 10:00:02 -> 2026-04-15 10:00:03 (1 packets lost)"
+        outage = Outage(
+            start="2026-04-15 10:00:02", end="2026-04-15 10:00:03", fails=1
+        )
+        assert format_outage(outage) == (
+            "2026-04-15 10:00:02 -> 2026-04-15 10:00:03 (1 packets lost)"
+        )
 
 
 class TestReport:

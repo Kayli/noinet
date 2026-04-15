@@ -1,10 +1,18 @@
-.PHONY: run test
+
+.PHONY: install run report test lint
+
+install:
+	python3 -m pip install --upgrade pip
+	python3 -m pip install --upgrade ".[dev]"
 
 run:
-	python3 ./ping_inet.py
+	python3 -m noinet.ping_inet
 
 report:
-	python3 ./ping_inet_report.py
+	python3 -m noinet.ping_inet_report
 
 test:
 	pytest -q
+
+lint:
+	python3 -m pylint noinet tests
